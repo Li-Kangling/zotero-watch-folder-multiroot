@@ -9,12 +9,12 @@ import { hashFile as _hashFileCached } from './_hashCache.mjs';
 import { scanFolder, scanFolderRecursive, SKIP_DIRNAMES } from './fileScanner.mjs';
 import { importFile, handlePostImportAction } from './fileImporter.mjs';
 import { TrackingStore, initTrackingStore, createFileRecord, createCollectionRecord, createTombstoneRecord, STATE } from './trackingStore.mjs';
-import { renameAttachment } from './fileRenamer.mjs';
+import { renameAttachment, restoredFilename } from './fileRenamer.mjs';
 import { processItemWithRules } from './smartRules.mjs';
 import { checkForDuplicate, getDuplicateDetector } from './duplicateDetector.mjs';
 import { report as reportWarning, WARNING_CATEGORY } from './warningSink.mjs';
 import { isBulkDelete, confirmBulkDelete, confirmFirstLibraryDelete } from './bulkGuard.mjs';
-import { canSafelyMove, canSafelyTrashZoteroAttachment } from './mirrorExecutor.mjs';
+import { canSafelyMove, canSafelyTrashZoteroAttachment, relinkLinkedAttachment, execute as executeMirror } from './mirrorExecutor.mjs';
 import { getStorageStrategy, STRATEGY } from './storageStrategy.mjs';
 import {
   resolveSyncRoot,
@@ -23,6 +23,8 @@ import {
   SyncRootMissingError,
   UNFILED,
   getScopeMode,
+  chooseCanonicalCollection,
+  collectionKeyToDiskRelativePath,
 } from './canonicalPath.mjs';
 import {
   classifyMissingFile,
@@ -128,7 +130,9 @@ export class WatchFolderService {
     const segs = storedPath.split('/').filter((s) => s.trim() !== '');
     if (!watchPath) return storedPath;
     if (segs.length === 0) return watchPath;
-    return PathUtils.join(watchPath, ...segs);
+    const nativeRoot = getPref('multiRootMode') === true && Zotero.isWin
+      ? watchPath.replace(/\//g, '\\') : watchPath;
+    return PathUtils.join(nativeRoot, ...segs);
   }
 
   /**
@@ -571,13 +575,22 @@ export class WatchFolderService {
       // FileRecord, and drop the tombstone. Falls through to the normal
       // import path if the Zotero side has been permanently purged.
       if (hash && this._trackingStore) {
-        const tombstone = this._trackingStore.findTombstoneByHash(hash);
-        if (tombstone && tombstone.zoteroAttachmentKey && tombstone.deletedFrom === 'zotero') {
+        const tombstone = this._trackingStore.findTombstoneByHash(hash,
+          getPref('multiRootMode') === true
+            ? this._toRelativeForStore(filePath, getPref('sourcePath') || '') : undefined);
+        if (tombstone && tombstone.zoteroAttachmentKey
+            && (tombstone.deletedFrom === 'zotero'
+                || (getPref('multiRootMode') === true && tombstone.deletedFrom === 'local'))) {
           try {
             const syncRoot = await resolveSyncRoot().catch(() => null);
             const libraryID = syncRoot?.libraryID ?? Zotero.Libraries.userLibraryID;
             const attachment = await Zotero.Items.getByLibraryAndKeyAsync(libraryID, tombstone.zoteroAttachmentKey);
             if (attachment) {
+              if (getPref('multiRootMode') === true && attachment.parentID) {
+                const parent = await Zotero.Items.getAsync(attachment.parentID);
+                if (!parent) throw new Error('Restore parent is unavailable');
+                if (parent.deleted) { parent.deleted = false; await parent.saveTx(); }
+              }
               if (attachment.deleted) {
                 try {
                   attachment.deleted = false;
@@ -589,6 +602,7 @@ export class WatchFolderService {
               }
               const watchPath = getPref('sourcePath') || '';
               const relFile = this._toRelativeForStore(filePath, watchPath);
+              const relink = await relinkLinkedAttachment(tombstone.zoteroAttachmentKey, filePath);
               this._trackingStore.add(createFileRecord({
                 localPath: relFile,
                 canonicalLocalPath: relFile,
@@ -597,7 +611,8 @@ export class WatchFolderService {
                 lastSyncedMtime,
                 zoteroItemKey: tombstone.zoteroItemKey,
                 zoteroAttachmentKey: tombstone.zoteroAttachmentKey,
-                state: STATE.CLEAN,
+                ...(getPref('multiRootMode') === true ? { canonicalCollectionKey } : {}),
+                state: relink.ok ? STATE.CLEAN : STATE.CONFLICT_BLOCKED,
               }));
               this._trackingStore.removeTombstoneByAttachmentKey(tombstone.zoteroAttachmentKey);
               await this._trackingStore.save();
@@ -616,7 +631,10 @@ export class WatchFolderService {
               try {
                 const parent = await Zotero.Items.getByLibraryAndKeyAsync(libraryID, tombstone.zoteroItemKey);
                 if (parent && !parent.deleted && (!parent.isAttachment || !parent.isAttachment())) {
-                  const newAttachment = await Zotero.Attachments.importFromFile({
+                  const attachFile = getPref('multiRootMode') === true
+                    ? Zotero.Attachments.linkFromFile.bind(Zotero.Attachments)
+                    : Zotero.Attachments.importFromFile.bind(Zotero.Attachments);
+                  const newAttachment = await attachFile({
                     file: filePath,
                     libraryID,
                     parentItemID: parent.id,
@@ -652,12 +670,19 @@ export class WatchFolderService {
             this._trackingStore.removeTombstoneByAttachmentKey(tombstone.zoteroAttachmentKey);
             await this._trackingStore.save();
           } catch (e) {
+            if (getPref('multiRootMode') === true) {
+              reportWarning({ category: WARNING_CATEGORY.CONFLICT_BLOCKED,
+                actionType: 'restore-attachment', attachmentKey: tombstone.zoteroAttachmentKey,
+                path: filePath, reason: 'restore-failed', message: String(e?.message ?? e) });
+              return; // Keep identity/tombstone; never import a duplicate after failed restore.
+            }
             Zotero.debug(`[WatchFolder] Tombstone re-link error: ${e?.message ?? e} — falling through to normal import`);
           }
         }
       }
 
-      if (hash && this._trackingStore) {
+      if (hash && this._trackingStore
+          && getPref('multiRootMode') !== true && getPref('independentFiles') !== true) {
         const existingByHash = this._trackingStore.findByHash(hash);
         if (existingByHash) {
           Zotero.debug(`[WatchFolder] File already tracked by hash: ${filePath}`);
@@ -693,7 +718,8 @@ export class WatchFolderService {
       // Step 3b: Full duplicate detection (hash → Extra-field lookup) if
       // enabled. This catches files whose tracking record was lost but whose
       // hash was previously stamped into a Zotero item.
-      const duplicateCheckEnabled = getPref('duplicateCheck') !== false;
+      const duplicateCheckEnabled = getPref('multiRootMode') !== true
+        && getPref('independentFiles') !== true && getPref('duplicateCheck') !== false;
       if (duplicateCheckEnabled) {
         try {
           const duplicateResult = await checkForDuplicate({}, filePath);
@@ -858,6 +884,8 @@ export class WatchFolderService {
       // metadata retrieval is disabled, the startup backfill picks this
       // up on the next launch.
       const stampHashWhenPossible = async (resolvedItem) => {
+        if (getPref('multiRootMode') === true
+            && (!this._initialized || getPref('enabled') !== true)) return;
         if (!hash) return;
         try {
           const detector = getDuplicateDetector();
@@ -889,6 +917,8 @@ export class WatchFolderService {
         const watchPathForCallback = getPref('sourcePath') || '';
         const finalRelKey = this._toRelativeForStore(finalPath, watchPathForCallback);
         this._metadataRetriever.queueItem(itemID, async (success, completedItemID) => {
+          if (getPref('multiRootMode') === true
+              && (!this._initialized || getPref('enabled') !== true)) return;
           if (this._trackingStore) {
             // Use the sync-root-relative key matching what _processNewFile
             // just wrote (#25 migration).
@@ -903,6 +933,8 @@ export class WatchFolderService {
           if (success && hash) {
             try {
               const attachmentItem = await Zotero.Items.getAsync(completedItemID);
+              if (getPref('multiRootMode') === true
+                  && (!this._initialized || getPref('enabled') !== true)) return;
               if (attachmentItem) {
                 // Update the tracking record's zoteroItemKey to reflect
                 // the newly-created parent (was the attachment key as a
@@ -922,6 +954,8 @@ export class WatchFolderService {
           if (success && getPref('autoRename') !== false) {
             try {
               const attachmentItem = await Zotero.Items.getAsync(completedItemID);
+              if (getPref('multiRootMode') === true
+                  && (!this._initialized || getPref('enabled') !== true)) return;
               if (attachmentItem && attachmentItem.isAttachment()) {
                 const renameResult = await renameAttachment(attachmentItem);
                 if (renameResult.success && renameResult.oldName !== renameResult.newName) {
@@ -1109,6 +1143,11 @@ export class WatchFolderService {
    */
   async _detectFolderRenames(scannedFiles, watchPath) {
     if (!this._trackingStore || !watchPath) return;
+    const norm = (p) => getPref('multiRootMode') === true ? p.replace(/\\/g, '/') : p;
+    watchPath = norm(watchPath);
+    if (getPref('multiRootMode') === true) {
+      scannedFiles = scannedFiles.map(f => ({ ...f, path: norm(f.path) }));
+    }
     const rawRecords = this._trackingStore.getAllOfType('collection');
     if (rawRecords.length === 0) return;
 
@@ -1119,14 +1158,14 @@ export class WatchFolderService {
     // record with an `_absLocalPath` field used throughout this fn.
     const collectionRecords = rawRecords.map(r => ({
       ...r,
-      _absLocalPath: this._resolveTrackedAbs(r.localPath, watchPath),
+      _absLocalPath: norm(this._resolveTrackedAbs(r.localPath, watchPath)),
     }));
 
     // ── 1. Build on-disk dir state (ABSOLUTE paths) ────────────────────
     // Include ALL existing subdirs (even empty ones) — otherwise a tracked
     // collection record for an empty folder would be flagged as missing
     // every scan and trigger spurious "no tracked file hashes — skip" log.
-    const onDiskDirs = new Set([watchPath, ...(await this._listSubdirectories(watchPath))]);
+    const onDiskDirs = new Set([watchPath, ...(await this._listSubdirectories(watchPath)).map(norm)]);
     for (const fileInfo of scannedFiles) {
       // WP-A2 (perf): prefer the scanner-provided relativePath when present
       // (avoids recomputing from absPath + watchPath each iteration). Falls
@@ -1209,7 +1248,7 @@ export class WatchFolderService {
     // orphan count regardless of loop order.
     const allTrackedFileAbs = this._trackingStore.getAllOfType('file')
       .filter(f => f.lastSyncedHash)
-      .map(f => this._resolveTrackedAbs(f.localPath, watchPath));
+      .map(f => norm(this._resolveTrackedAbs(f.localPath, watchPath)));
     const missingHasTrackedFiles = (absPath) => {
       const prefix = absPath + '/';
       return allTrackedFileAbs.some(a => a === absPath || a.startsWith(prefix));
@@ -1257,7 +1296,7 @@ export class WatchFolderService {
       const trackedShape = new Map(); // hash → tail under oldPath
       for (const f of trackedFilesNow) {
         if (!f.lastSyncedHash) continue;
-        const fAbs = this._resolveTrackedAbs(f.localPath, watchPath);
+        const fAbs = norm(this._resolveTrackedAbs(f.localPath, watchPath));
         let tail;
         if (fAbs === oldPath) tail = '';
         else if (fAbs.startsWith(oldPrefix)) tail = fAbs.slice(oldPrefix.length);
@@ -1285,7 +1324,7 @@ export class WatchFolderService {
 
       const trackedDirs = new Set(
         this._trackingStore.getAllOfType('collection')
-          .map(r => this._resolveTrackedAbs(r.localPath, watchPath)),
+          .map(r => norm(this._resolveTrackedAbs(r.localPath, watchPath))),
       );
       const candidateDirs = [...onDiskDirs].filter(d =>
         d !== watchPath && !trackedDirs.has(d));
@@ -1331,11 +1370,13 @@ export class WatchFolderService {
     // normalization pass) or raw localPath that's relative or absolute.
     // newPath is the new absolute disk path of the renamed dir.
     const watchPath = getPref('sourcePath') || '';
-    const oldAbs = oldRecord._absLocalPath
-      ?? this._resolveTrackedAbs(oldRecord.localPath, watchPath);
-    const newAbs = newPath;
+    const norm = (p) => getPref('multiRootMode') === true ? p.replace(/\\/g, '/') : p;
+    const oldAbs = norm(oldRecord._absLocalPath
+      ?? this._resolveTrackedAbs(oldRecord.localPath, watchPath));
+    const newAbs = norm(newPath);
     const newRel = this._toRelativeForStore(newAbs, watchPath);
-    const newName = newPath.split('/').pop();
+    const newName = newPath.replace(/\\/g, '/').split('/').pop();
+    let newParentCollectionKey = oldRecord.parentCollectionKey;
     try {
       const syncRoot = await resolveSyncRoot().catch(() => null);
       const libraryID = syncRoot?.libraryID ?? Zotero.Libraries.userLibraryID;
@@ -1345,7 +1386,18 @@ export class WatchFolderService {
         Zotero.debug(`[WatchFolder] Rename: Zotero collection ${oldRecord.zoteroCollectionKey} not found`);
         return;
       }
-      if (collection.name !== newName) {
+      let parentChanged = false;
+      if (getPref('multiRootMode') === true) {
+        const parentRel = newRel.split('/').slice(0, -1).join('/');
+        const parent = await relativePathToCollection(parentRel, { createIfMissing: true });
+        if (!parent || parent === UNFILED) throw new Error('Move destination collection is unavailable');
+        newParentCollectionKey = parent.key;
+        if (collection.parentID !== parent.id) {
+          collection.parentID = parent.id;
+          parentChanged = true;
+        }
+      }
+      if (collection.name !== newName || parentChanged) {
         collection.name = newName;
         await collection.saveTx();
       }
@@ -1359,6 +1411,7 @@ export class WatchFolderService {
     this._trackingStore.add(createCollectionRecord({
       ...oldRecord,
       localPath: newRel,
+      ...(getPref('multiRootMode') === true ? { parentCollectionKey: newParentCollectionKey } : {}),
     }));
 
     // Recursively update descendants. Iterate snapshots because we mutate
@@ -1369,13 +1422,15 @@ export class WatchFolderService {
 
     const files = this._trackingStore.getAllOfType('file').slice();
     for (const f of files) {
-      const fAbs = this._resolveTrackedAbs(f.localPath, watchPath);
+      const fAbs = norm(this._resolveTrackedAbs(f.localPath, watchPath));
       let newLocalAbs = null;
       if (fAbs === oldAbs) newLocalAbs = newAbs;
       else if (fAbs.startsWith(oldPrefix)) newLocalAbs = newPrefix + fAbs.slice(oldPrefix.length);
       else continue;
       const newLocalRel = this._toRelativeForStore(newLocalAbs, watchPath);
-      const updated = { ...f, localPath: newLocalRel, canonicalLocalPath: newLocalRel };
+      const relink = await relinkLinkedAttachment(f.zoteroAttachmentKey, newLocalAbs);
+      const updated = { ...f, localPath: newLocalRel, canonicalLocalPath: newLocalRel,
+        ...(!relink.ok ? { state: STATE.CONFLICT_BLOCKED } : {}) };
       this._trackingStore.remove(f.localPath);
       this._trackingStore.add(updated);
     }
@@ -1383,7 +1438,7 @@ export class WatchFolderService {
     const cols = this._trackingStore.getAllOfType('collection').slice();
     for (const c of cols) {
       if (c.zoteroCollectionKey === oldRecord.zoteroCollectionKey) continue; // already handled
-      const cAbs = this._resolveTrackedAbs(c.localPath, watchPath);
+      const cAbs = norm(this._resolveTrackedAbs(c.localPath, watchPath));
       if (!cAbs.startsWith(oldPrefix)) continue;
       const tail = cAbs.slice(oldPrefix.length);
       const newLocalAbs = newPrefix + tail;
@@ -1578,7 +1633,7 @@ export class WatchFolderService {
           // Cheap pre-filter: only do restore work when we actually
           // have tombstones to consult — otherwise modify events on
           // every metadata edit would walk the entire tracking store.
-          if (this._trackingStore.getAllOfType('tombstone').length === 0) break;
+          if (getPref('multiRootMode') !== true && this._trackingStore.getAllOfType('tombstone').length === 0) break;
           await this._handleZoteroRestore(ids);
           break;
         }
@@ -1792,7 +1847,8 @@ export class WatchFolderService {
       }
     }
 
-    let action = getPref('diskDeleteOnTrash') || 'plugin_trash';
+    let action = getPref('multiRootMode') === true
+      ? 'plugin_trash' : (getPref('diskDeleteOnTrash') || 'plugin_trash');
     if (action === 'ask' && deletable.length > 0) {
       action = this._promptDiskDelete(
         deletable.map(p => ({ attachmentKey: p.attachmentKey, path: p.canonicalDiskPath }))
@@ -1973,11 +2029,18 @@ export class WatchFolderService {
       if (attachment.deleted !== false) continue;
 
       const tombstone = this._trackingStore.findTombstoneByAttachmentKey(attachmentKey);
-      if (!tombstone) continue; // not a tombstoned attachment — nothing to restore
+      if (!tombstone) {
+        if (getPref('multiRootMode') === true) await this._restoreUntrackedStoredAttachment(attachment);
+        continue;
+      }
 
       // Resolve the source (plugin trash) and destination (canonical path).
       const srcRel = tombstone.trashPath;
-      const dstRel = tombstone.canonicalLocalPath || tombstone.localPath;
+      let dstRel = tombstone.canonicalLocalPath || tombstone.localPath;
+      if (dstRel && getPref('multiRootMode') === true) {
+        const slash = dstRel.lastIndexOf('/');
+        dstRel = dstRel.slice(0, slash + 1) + restoredFilename(attachment, dstRel.slice(slash + 1));
+      }
       if (!srcRel || !dstRel) {
         // OS-trash tombstones have no addressable trashPath; we can't
         // restore the bytes ourselves. Drop the tombstone so the next
@@ -1985,6 +2048,7 @@ export class WatchFolderService {
         // Zotero attachment's content if Zotero still has the file).
         Zotero.debug(`[WatchFolder] _handleZoteroRestore: no trashPath for ${attachmentKey}; dropping tombstone`);
         this._trackingStore.removeTombstoneByAttachmentKey(attachmentKey);
+        if (getPref('multiRootMode') === true) await this._restoreUntrackedStoredAttachment(attachment);
         continue;
       }
 
@@ -1999,6 +2063,7 @@ export class WatchFolderService {
       if (!srcExists) {
         Zotero.debug(`[WatchFolder] _handleZoteroRestore: trash source ${srcAbs} missing; dropping tombstone`);
         this._trackingStore.removeTombstoneByAttachmentKey(attachmentKey);
+        if (getPref('multiRootMode') === true) await this._restoreUntrackedStoredAttachment(attachment);
         continue;
       }
 
@@ -2029,14 +2094,19 @@ export class WatchFolderService {
       }
 
       try {
-        await IOUtils.move(srcAbs, dstAbs);
+        if (getPref('multiRootMode') === true) await IOUtils.move(srcAbs, dstAbs, { noOverwrite: true });
+        else await IOUtils.move(srcAbs, dstAbs);
       } catch (moveErr) {
+        if (getPref('multiRootMode') === true) {
+          try { if (await IOUtils.exists(dstAbs)) continue; } catch (_e) { continue; }
+        }
         // Cross-FS fallback.
         try {
-          await IOUtils.copy(srcAbs, dstAbs);
+          if (getPref('multiRootMode') === true) await IOUtils.copy(srcAbs, dstAbs, { noOverwrite: true });
+          else await IOUtils.copy(srcAbs, dstAbs);
           await IOUtils.remove(srcAbs);
         } catch (copyErr) {
-          try { await IOUtils.remove(dstAbs, { ignoreAbsent: true }); }
+          try { if (getPref('multiRootMode') !== true) await IOUtils.remove(dstAbs, { ignoreAbsent: true }); }
           catch (_e) { /* best effort */ }
           Zotero.debug(`[WatchFolder] _handleZoteroRestore: move ${srcAbs} → ${dstAbs} failed: ${copyErr?.message ?? copyErr}`);
           continue;
@@ -2044,19 +2114,84 @@ export class WatchFolderService {
       }
 
       // Re-create the FileRecord and drop the tombstone.
+      const relink = await relinkLinkedAttachment(attachmentKey, dstAbs);
+      const owner = attachment.parentItem || attachment;
+      const syncRoot = getPref('multiRootMode') === true ? await resolveSyncRoot() : null;
+      const canonical = syncRoot ? await chooseCanonicalCollection(owner, syncRoot.collection) : null;
+      const stat = getPref('multiRootMode') === true ? await IOUtils.stat(dstAbs) : null;
       this._trackingStore.add(createFileRecord({
         localPath: dstRel2,
         canonicalLocalPath: dstRel2,
         lastSyncedHash: tombstone.originalHash,
         zoteroItemKey: tombstone.zoteroItemKey,
         zoteroAttachmentKey: attachmentKey,
-        state: STATE.CLEAN,
+        ...(getPref('multiRootMode') === true ? {
+          zoteroItemKey: owner.key, canonicalCollectionKey: canonical?.key || null,
+          collectionMembershipKeys: canonical?.key ? [canonical.key] : [],
+          lastSyncedSize: stat.size, lastSyncedMtime: stat.lastModified,
+        } : {}),
+        state: relink.ok ? STATE.CLEAN : STATE.CONFLICT_BLOCKED,
       }));
       this._trackingStore.removeTombstoneByAttachmentKey(attachmentKey);
       Zotero.debug(`[WatchFolder] _handleZoteroRestore: restored ${attachmentKey} → ${dstRel2}`);
     }
 
     try { await this._trackingStore.save(); } catch (_) {}
+  }
+
+  /** Repair restored stored PDFs without inventing a new item or attachment. */
+  async _restoreUntrackedStoredAttachment(attachment) {
+    if (getPref('multiRootMode') !== true || getPref('enabled') !== true || !this._initialized
+      || this._trackingStore.getByAttachmentKey(attachment.key) || attachment.deleted
+      || !attachment.isStoredFileAttachment?.() || attachment.attachmentContentType !== 'application/pdf') return;
+    const owner = attachment.parentItem || attachment;
+    if (owner.deleted || await Zotero.WatchFolderMultiRootOwnership?.isOwnedElsewhere?.(attachment.key)) return;
+    const syncRoot = await resolveSyncRoot();
+    if (!syncRoot?.collection) return;
+    const canonical = await chooseCanonicalCollection(owner, syncRoot.collection);
+    if (!canonical || canonical === UNFILED) return;
+    const dir = await collectionKeyToDiskRelativePath(canonical.key);
+    if (dir == null) return;
+    const filename = restoredFilename(attachment, attachment.attachmentFilename);
+    if (!filename || /[\\/\0]/.test(filename) || filename === '.' || filename === '..') return;
+    const source = await attachment.getFilePathAsync();
+    if (!source || !await IOUtils.exists(source)) return;
+    const hash = await getFileHash(source);
+    if (!hash) throw new Error('Cannot verify stored PDF for restore');
+    let rel = (dir ? dir + '/' : '') + filename;
+    let dest = this._resolveTrackedAbs(rel, getPref('sourcePath'));
+    // Never adopt a different attachment's path, even if its bytes are identical.
+    if (await IOUtils.exists(dest) || this._trackingStore.hasPath(rel)) {
+      rel = rel.replace(/\.pdf$/i, '') + '.restored.' + attachment.key + '.pdf';
+      dest = this._resolveTrackedAbs(rel, getPref('sourcePath'));
+      if (this._trackingStore.hasPath(rel)) return;
+      if (await IOUtils.exists(dest)) {
+        if (await getFileHash(dest) !== hash) throw new Error('Restore destination already exists with different content');
+      }
+    }
+    if (getPref('enabled') !== true || !this._initialized || owner.deleted || attachment.deleted) return;
+    await IOUtils.makeDirectory(PathUtils.parent(dest), { createAncestors: true, ignoreExisting: true });
+    if (!await IOUtils.exists(dest)) await IOUtils.copy(source, dest, { noOverwrite: true });
+    if (await getFileHash(dest) !== hash) throw new Error('Restored PDF checksum mismatch');
+    const stat = await IOUtils.stat(dest);
+    this._trackingStore.add(createFileRecord({ localPath: rel, canonicalLocalPath: rel,
+      lastSyncedHash: hash, lastSyncedSize: stat.size, lastSyncedMtime: stat.lastModified,
+      zoteroItemKey: owner.key, zoteroAttachmentKey: attachment.key,
+      canonicalCollectionKey: canonical.key, collectionMembershipKeys: [canonical.key], state: STATE.CLEAN }));
+    await this._trackingStore.flush();
+  }
+
+  /** Upgrade already restored stored mirrors without renaming the storage original. */
+  async _applyStoredMirrorName(attachment, record) {
+    if (getPref('autoRename') !== true || record.state !== STATE.CLEAN
+      || !attachment.isStoredFileAttachment?.() || attachment.deleted || attachment.parentItem?.deleted) return;
+    const oldRel = record.canonicalLocalPath || record.localPath;
+    const slash = oldRel.lastIndexOf('/');
+    const rel = oldRel.slice(0, slash + 1) + restoredFilename(attachment, oldRel.slice(slash + 1));
+    if (rel === oldRel || await IOUtils.exists(this._resolveTrackedAbs(rel, getPref('sourcePath')))
+      || this._trackingStore.hasPath(rel)) return;
+    await executeMirror({ type: 'moveItem', payload: { attachmentKey: attachment.key,
+      oldCanonicalPath: oldRel, newCanonicalPath: rel, newCanonicalCollectionKey: record.canonicalCollectionKey } });
   }
 
   /**
@@ -2201,19 +2336,26 @@ export class WatchFolderService {
       trashAbs = PathUtils.join(watchRoot, ...trashRel.split('/'));
     }
 
+    const multiRoot = getPref('multiRootMode') === true;
     try {
-      await IOUtils.move(absPath, trashAbs);
+      if (multiRoot) await IOUtils.move(absPath, trashAbs, { noOverwrite: true });
+      else await IOUtils.move(absPath, trashAbs);
       Zotero.debug(`[WatchFolder] _moveToPluginTrash: ${absPath} → ${trashAbs}`);
       return trashRel;
     } catch (moveErr) {
+      if (multiRoot) {
+        try { if (await IOUtils.exists(trashAbs)) return null; }
+        catch (_e) { return null; }
+      }
       // Cross-FS fallback (rare for same-watch-root moves, but defensive).
       try {
-        await IOUtils.copy(absPath, trashAbs);
+        if (multiRoot) await IOUtils.copy(absPath, trashAbs, { noOverwrite: true });
+        else await IOUtils.copy(absPath, trashAbs);
         await IOUtils.remove(absPath);
         Zotero.debug(`[WatchFolder] _moveToPluginTrash: copy+remove fallback for ${absPath} → ${trashAbs}`);
         return trashRel;
       } catch (copyErr) {
-        try { await IOUtils.remove(trashAbs, { ignoreAbsent: true }); }
+        try { if (!multiRoot) await IOUtils.remove(trashAbs, { ignoreAbsent: true }); }
         catch (_e) { /* best effort */ }
         Zotero.debug(`[WatchFolder] _moveToPluginTrash: ${absPath} → plugin trash failed: ${copyErr?.message ?? copyErr}`);
         return null;
@@ -2243,6 +2385,9 @@ export class WatchFolderService {
     } catch (e) {
       Zotero.debug(`[WatchFolder] OS trash failed for ${path}: ${e.message} — falling back to permanent delete`);
     }
+    // Multi-root deletion is always recoverable. A platform trash failure
+    // keeps the source; upstream retains its original fallback behavior.
+    if (getPref('multiRootMode') === true) throw new Error('Recoverable trash is unavailable');
     // Fallback
     try {
       await IOUtils.remove(path);
@@ -2339,10 +2484,13 @@ export class WatchFolderService {
     const moves = [];
     const trulyMissing = [];
     if (allFiles && allFiles.length > 0) {
-      const trackedPaths = new Set(records.map(r => r.localPath));
+      const pathKey = (p) => getPref('multiRootMode') === true
+        ? p.replace(/\\/g, '/') : p;
+      const trackedPaths = new Set(records.map(r => pathKey(getPref('multiRootMode') === true
+        ? this._resolveTrackedAbs(r.localPath, watchPath) : r.localPath)));
       const candidates = allFiles
         .map(f => f.path)
-        .filter(p => !trackedPaths.has(p) && !this._processingFiles.has(p));
+        .filter(p => !trackedPaths.has(pathKey(p)) && !this._processingFiles.has(p));
       // WP-A1 (perf): module-level (path, size, mtime) LRU cache — replaces
       // the per-invocation Map. Files with unchanged size + mtime hit the
       // cache instead of re-reading the full file every scan cycle.
@@ -2460,7 +2608,7 @@ export class WatchFolderService {
     // never propagates without explicit consent.
     let permanent = false;       // erase the Zotero item(s) outright vs. trash
     let userConfirmed = false;   // the ask-dialog already confirmed → skip the bulk prompt + after-popup
-    if ((getPref('diskDeleteSync') || 'ask') === 'ask') {
+    if (getPref('multiRootMode') !== true && (getPref('diskDeleteSync') || 'ask') === 'ask') {
       const choice = this._promptExternalDeletion(stillMissing.map(r => r.localPath));
       userConfirmed = true;
       if (choice === 'keep') {
@@ -2590,6 +2738,13 @@ export class WatchFolderService {
           target.deleted = true;
           await target.saveTx();
         }
+        if (getPref('multiRootMode') === true) {
+          this._trackingStore.add(createTombstoneRecord({
+            localPath: record.localPath, canonicalLocalPath: record.canonicalLocalPath,
+            zoteroAttachmentKey: record.zoteroAttachmentKey, zoteroItemKey: record.zoteroItemKey,
+            deletedFrom: 'local', originalHash: record.lastSyncedHash, trashPath: null,
+          }));
+        }
         trashed.push({ path: record.localPath, attachmentKey: record.zoteroAttachmentKey, title, permanent });
       } catch (e) {
         Zotero.debug(`[WatchFolder] Failed to auto-bin item ${record.zoteroAttachmentKey}: ${e.message}`);
@@ -2600,7 +2755,7 @@ export class WatchFolderService {
     try { await this._trackingStore.save(); } catch (_) {}
     // Only show the after-the-fact summary for the SILENT 'auto' path. When the
     // user just answered the disposition prompt, they already know what happened.
-    if (trashed.length > 0 && !userConfirmed) this._showExternalDeletionPopup(trashed);
+    if (trashed.length > 0 && !userConfirmed && getPref('multiRootMode') !== true) this._showExternalDeletionPopup(trashed);
   }
 
   /**
@@ -2747,18 +2902,28 @@ export class WatchFolderService {
     };
 
     for (const { record, newPath } of moves) {
-      const oldRel = relativeDirFor(record.localPath);
+      const oldRel = relativeDirFor(getPref('multiRootMode') === true
+        ? this._resolveTrackedAbs(record.localPath, watchPath) : record.localPath);
       const newRel = relativeDirFor(newPath);
       Zotero.debug(`[WatchFolder] Move: ${record.localPath} → ${newPath}`);
       Zotero.debug(`[WatchFolder] Move: relativeDir "${oldRel}" → "${newRel}"`);
 
+      let relinkOK = true;
       try {
         const syncRoot = await resolveSyncRoot().catch(() => null);
         const libraryID = syncRoot?.libraryID ?? Zotero.Libraries.userLibraryID;
         const item = await Zotero.Items.getByLibraryAndKeyAsync(libraryID, record.zoteroAttachmentKey);
 
         if (item && !item.deleted) {
+          if (getPref('multiRootMode') === true) {
+            const relink = await relinkLinkedAttachment(record.zoteroAttachmentKey, newPath);
+            relinkOK = relink.ok;
+          }
           if (oldRel !== newRel && newRel != null) {
+            // Child attachments do not own collection membership in Zotero.
+            const membershipItem = getPref('multiRootMode') === true && item.parentID
+              ? await Zotero.Items.getAsync(item.parentID) : item;
+            if (!membershipItem) throw new Error('Parent item is unavailable');
             // Resolve / create the new auto-mapped collection under the sync root.
             const newCollection = await relativePathToCollection(newRel, { createIfMissing: true });
             // Library scope: a move UP TO THE ROOT yields newRel '' →
@@ -2773,18 +2938,19 @@ export class WatchFolderService {
               const oldCollection = (oldRel != null)
                 ? await relativePathToCollection(oldRel, { createIfMissing: false }).catch(() => null)
                 : null;
-              const currentColIDs = item.getCollections ? item.getCollections() : [];
+              const currentColIDs = membershipItem.getCollections ? membershipItem.getCollections() : [];
               if (oldCollection && oldCollection !== UNFILED && currentColIDs.includes(oldCollection.id)) {
-                item.removeFromCollection(oldCollection.id);
+                membershipItem.removeFromCollection(oldCollection.id);
               }
               if (!newIsUnfiled && !currentColIDs.includes(newCollection.id)) {
-                item.addToCollection(newCollection.id);
+                membershipItem.addToCollection(newCollection.id);
               }
-              await item.saveTx();
+              await membershipItem.saveTx();
             }
           }
         }
       } catch (e) {
+        if (getPref('multiRootMode') === true) relinkOK = false;
         Zotero.debug(`[WatchFolder] Move: failed to reassign collection for ${record.zoteroAttachmentKey}: ${e.message}`);
       }
 
@@ -2813,6 +2979,7 @@ export class WatchFolderService {
           localPath: newRelLocal,
           canonicalLocalPath: newRelLocal,
           canonicalCollectionKey: newCanonicalCollectionKey,
+          ...(!relinkOK ? { state: STATE.CONFLICT_BLOCKED } : {}),
           // Moved to Unfiled (null canonical) → drop the stale membership keys
           // carried over from the prior location, so the record doesn't claim
           // membership in the collection it just left. Non-Unfiled moves leave
@@ -2968,11 +3135,15 @@ export class WatchFolderService {
 
         const finalRelKey = record.localPath;
         this._metadataRetriever.queueItem(item.id, async (success, completedItemID) => {
+          if (getPref('multiRootMode') === true
+              && (!this._initialized || getPref('enabled') !== true)) return;
           if (!this._trackingStore) return;
           this._trackingStore.update(finalRelKey, { metadataRetrieved: success });
           if (success) {
             try {
               const refreshed = await Zotero.Items.getAsync(completedItemID);
+              if (getPref('multiRootMode') === true
+                  && (!this._initialized || getPref('enabled') !== true)) return;
               if (refreshed && refreshed.parentItem) {
                 this._trackingStore.update(finalRelKey, { zoteroItemKey: refreshed.parentItem.key });
               }

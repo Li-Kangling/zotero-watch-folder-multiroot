@@ -16,7 +16,7 @@
  * @module trackingStore
  */
 
-import { sanitizeUntrustedKeys } from './utils.mjs';
+import { getPref, sanitizeUntrustedKeys } from './utils.mjs';
 
 const TRACKING_FILENAME = 'zotero-watch-folder-tracking-v2.json';
 const SCHEMA_VERSION = 2;
@@ -250,7 +250,16 @@ export class TrackingStore {
     if (this._initialized) return;
     try {
       const dataDir = Zotero.DataDirectory.dir;
-      this.dataFile = PathUtils.join(dataDir, TRACKING_FILENAME);
+      // A separately bundled root engine keeps its own records in the real
+      // Zotero data directory. Never accept a path from this preference.
+      const configuredName = getPref('trackingFileName');
+      if (configuredName != null && configuredName !== ''
+          && (typeof configuredName !== 'string'
+              || !/^[A-Za-z0-9][A-Za-z0-9._-]*\.json$/.test(configuredName)
+              || configuredName.includes('..'))) {
+        throw new Error('Invalid trackingFileName: expected a JSON basename');
+      }
+      this.dataFile = PathUtils.join(dataDir, configuredName || TRACKING_FILENAME);
       Zotero.debug(`[WatchFolder] TrackingStore: data file ${this.dataFile}`);
       await this.load();
       this._initialized = true;
@@ -640,7 +649,7 @@ export class TrackingStore {
    * @param {string} hash
    * @returns {TombstoneRecord|null}
    */
-  findTombstoneByHash(hash) {
+  findTombstoneByHash(hash, localPath = undefined) {
     this._ensureInitialized();
     if (!hash) return null;
     // WP-B / B1: O(1) bucket lookup. Inside the bucket we still walk to
@@ -650,6 +659,7 @@ export class TrackingStore {
     if (!bucket) return null;
     let best = null;
     for (const t of bucket) {
+      if (localPath !== undefined && t.localPath !== localPath) continue;
       if (t.state === STATE.RECOVERABLE) {
         if (!best || (t.deletedAt > best.deletedAt)) best = t;
       }

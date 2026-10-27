@@ -254,6 +254,50 @@ export async function canSafelyMove(record, absPath) {
 export async function canSafelyTrashZoteroAttachment(record, attachmentItem) {
   if (!record || !attachmentItem) return { ok: false, reason: 'invalid-record' };
   if (!record.lastSyncedHash) return { ok: false, reason: 'no-baseline' };
+  if (getPref('multiRootMode') === true && _isLinkedAttachment(attachmentItem)) {
+    // Linked files have no second Zotero-owned copy to hash after deletion.
+    // Prove that this exact tracked link disappeared under a readable root;
+    // never weaken the upstream stored-file freshness check.
+    try {
+      const root = _watchRoot();
+      const rootInfo = await IOUtils.stat(root);
+      if (rootInfo.type !== 'directory') return { ok: false, reason: 'root-unavailable' };
+      await IOUtils.getChildren(root); // Permission / unmount errors refuse.
+      const expected = _absPath(record.canonicalLocalPath || record.localPath);
+      const normalize = (p) => {
+        const s = String(p).replace(/\\/g, '/').replace(/\/$/, '');
+        return Zotero.isWin || /^[A-Za-z]:/.test(s) ? s.toLowerCase() : s;
+      };
+      const rootNorm = normalize(root);
+      const expectedNorm = normalize(expected);
+      if (!expectedNorm.startsWith(rootNorm + '/')
+          || expectedNorm.split('/').some((p) => p === '..' || p === '.')) {
+        return { ok: false, reason: 'path-outside-root' };
+      }
+      let linkPath = typeof attachmentItem.getFilePath === 'function'
+        ? attachmentItem.getFilePath() : null;
+      // Zotero can return false for a missing link. Its raw absolute path is
+      // still a valid identity anchor; relative attachment-base paths are not.
+      if (!linkPath && (String(attachmentItem.attachmentPath || '').startsWith('/')
+          || /^[A-Za-z]:[\\/]/.test(attachmentItem.attachmentPath || ''))) {
+        linkPath = attachmentItem.attachmentPath;
+      }
+      if (!linkPath || normalize(linkPath) !== expectedNorm) {
+        return { ok: false, reason: 'linked-path-mismatch' };
+      }
+      if (!(await IOUtils.exists(expected))) {
+        try {
+          await IOUtils.stat(expected);
+          return { ok: false, reason: 'file-state-uncertain' };
+        } catch (e) {
+          if (e?.name === 'NotFoundError' || e?.becauseNoSuchFile === true) return { ok: true };
+          return { ok: false, reason: 'io-error', error: String(e?.message ?? e) };
+        }
+      }
+    } catch (e) {
+      return { ok: false, reason: 'io-error', error: String(e?.message ?? e) };
+    }
+  }
   let storedPath = null;
   try {
     if (typeof attachmentItem.getFilePathAsync === 'function') {
@@ -285,6 +329,36 @@ export async function canSafelyTrashZoteroAttachment(record, attachmentItem) {
     };
   }
   return { ok: true };
+}
+
+function _isLinkedAttachment(item) {
+  if (typeof item?.isLinkedFileAttachment === 'function') return item.isLinkedFileAttachment();
+  const linkedMode = Zotero.Attachments?.LINK_MODE_LINKED_FILE;
+  return linkedMode !== undefined && item?.attachmentLinkMode === linkedMode;
+}
+
+/** Relink in place after a move, keeping the attachment key and annotations. */
+export async function relinkLinkedAttachment(attachmentKey, absolutePath) {
+  if (getPref('multiRootMode') !== true) return { ok: true };
+  try {
+    const syncRoot = await resolveSyncRoot();
+    const libraryID = syncRoot?.libraryID ?? Zotero.Libraries.userLibraryID;
+    const attachment = await Zotero.Items.getByLibraryAndKeyAsync(libraryID, attachmentKey);
+    if (!attachment) throw new Error('Attachment is unavailable');
+    if (!_isLinkedAttachment(attachment)) return { ok: true };
+    if (typeof attachment.relinkAttachmentFile !== 'function') {
+      throw new Error('relinkAttachmentFile is unavailable');
+    }
+    await attachment.relinkAttachmentFile(absolutePath);
+    return { ok: true };
+  } catch (e) {
+    reportWarning({
+      category: WARNING_CATEGORY.CONFLICT_BLOCKED,
+      actionType: 'relink-attachment', attachmentKey, path: absolutePath,
+      reason: 'relink-failed', message: `Attachment relink failed: ${e?.message ?? e}`,
+    });
+    return { ok: false, reason: 'relink-failed' };
+  }
 }
 
 // ─── Path helpers ─────────────────────────────────────────────────────────
@@ -494,12 +568,14 @@ async function _moveFolder(payload) {
           const newCanonical = wasCanonical
             ? newPath
             : _rewriteIfUnder(live.canonicalLocalPath, oldRelativePath, prefix, newRelativePath);
+          const relink = await relinkLinkedAttachment(live.zoteroAttachmentKey, _absPath(newCanonical));
           // localPath is the Map key — must remove + re-add to re-key.
           _store.remove(live.localPath);
           _store.add(createFileRecord({
             ...live,
             localPath: newPath,
             canonicalLocalPath: newCanonical,
+            ...(!relink.ok ? { state: STATE.CONFLICT_BLOCKED } : {}),
           }));
           rewritten.add(live.zoteroAttachmentKey);
         });
@@ -638,7 +714,7 @@ async function _zoteroCollectionDeleted(payload) {
           affected++;
         }
       }
-      if (isBulkDelete(affected, allFiles.length)) {
+      if (getPref('multiRootMode') === true || isBulkDelete(affected, allFiles.length)) {
         const approved = await confirmBulkDelete({
           action: 'move to plugin trash',
           path: oldRelativePath,
@@ -845,9 +921,9 @@ async function _localFolderDeleted(payload) {
     }
 
     // Bulk-delete protection — count the attachments that would be trashed.
-    if (_store && children.length > 0) {
+    if (_store && (children.length > 0 || getPref('multiRootMode') === true)) {
       const totalTracked = _store.getAllOfType('file').length;
-      if (isBulkDelete(children.length, totalTracked)) {
+      if (getPref('multiRootMode') === true || isBulkDelete(children.length, totalTracked)) {
         const approved = await confirmBulkDelete({
           action: 'trash in Zotero (local folder deleted)',
           path: oldRelativePath,
@@ -1063,11 +1139,13 @@ async function _moveItem(payload) {
       const rec = _store.getByAttachmentKey(attachmentKey);
       if (rec) {
         const wasCanonical = rec.canonicalLocalPath === rec.localPath;
+        const relink = await relinkLinkedAttachment(attachmentKey, newAbs);
         _store.remove(rec.localPath);
         _store.add(createFileRecord({
           ...rec,
           localPath: newCanonicalPath,
           canonicalLocalPath: wasCanonical ? newCanonicalPath : rec.canonicalLocalPath,
+          ...(!relink.ok ? { state: STATE.CONFLICT_BLOCKED } : {}),
           // Keep the canonical-collection field in sync when the caller is
           // re-canonicalizing (A3 path). Undefined → leave existing value.
           canonicalCollectionKey: (typeof newCanonicalCollectionKey !== 'undefined')
@@ -1204,15 +1282,27 @@ async function _moveWithFallback(srcAbs, dstAbs, recursive) {
     await IOUtils.move(srcAbs, dstAbs, { noOverwrite: true });
     return { ok: true };
   } catch (moveErr) {
+    const multiRoot = getPref('multiRootMode') === true;
+    if (multiRoot) {
+      // noOverwrite failures include existing targets, not just cross-drive
+      // moves. Never turn one into an overwriting copy or destructive cleanup.
+      try {
+        if (await IOUtils.exists(dstAbs)) return { ok: false, reason: 'destination-exists' };
+      } catch (e) {
+        return { ok: false, reason: 'io-error', error: String(e?.message ?? e) };
+      }
+    }
     Zotero.debug(`[WatchFolder] mirrorExecutor: IOUtils.move failed (${moveErr?.message ?? moveErr}), falling back to copy+remove`);
     try {
-      await IOUtils.copy(srcAbs, dstAbs, recursive ? { recursive: true } : undefined);
+      await IOUtils.copy(srcAbs, dstAbs, multiRoot
+        ? { noOverwrite: true, ...(recursive ? { recursive: true } : {}) }
+        : (recursive ? { recursive: true } : undefined));
       await IOUtils.remove(srcAbs, recursive ? { recursive: true } : undefined);
       return { ok: true, reason: 'copy-fallback' };
     } catch (copyErr) {
       // Rollback: best-effort remove of partial destination so the next
       // attempt doesn't see a stale half-copy.
-      try { await IOUtils.remove(dstAbs, recursive ? { recursive: true, ignoreAbsent: true } : { ignoreAbsent: true }); }
+      try { if (!multiRoot) await IOUtils.remove(dstAbs, recursive ? { recursive: true, ignoreAbsent: true } : { ignoreAbsent: true }); }
       catch (_e) { /* best effort */ }
       Zotero.logError(`[WatchFolder] mirrorExecutor: copy-fallback failed: ${copyErr?.message ?? copyErr}`);
       return { ok: false, reason: 'io-error', error: String(copyErr?.message ?? copyErr) };

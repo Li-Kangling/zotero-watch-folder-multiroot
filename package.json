@@ -1,16 +1,16 @@
 {
-  "name": "zotero-watch-folder",
-  "version": "2.8.6",
-  "description": "Zotero plugin for automatic PDF import from watched folders",
-  "author": "Jose Siqueira",
+  "name": "zotero-watch-folder-multiroot",
+  "version": "2.8.6.4",
+  "description": "Multiple independent local folders mirrored to Zotero collections",
+  "author": "Li-Kangling; based on Zotero Watch Folder by Jose Siqueira",
   "license": "GPL-3.0-only",
   "scripts": {
-    "bundle": "node build/bundle.mjs",
-    "build": "node build/build.mjs",
-    "release": "npm run build && npm run bundle && npm run package && npm run release:upload",
+    "build": "node build/multiroot.mjs",
+    "bundle": "node build/multiroot.mjs",
+    "package": "node build/multiroot.mjs",
+    "source": "node build/source-archive.mjs",
+    "release": "npm test && npm run build && npm run source && node build/release-upload.mjs",
     "release:upload": "node build/release-upload.mjs",
-    "package": "node build/package.mjs",
-    "clean": "rm -rf dist *.xpi",
     "test": "vitest run",
     "test:watch": "vitest"
   },
@@ -18,5 +18,13 @@
     "archiver": "^7.0.0",
     "esbuild": "^0.28.0",
     "vitest": "^4.1.0"
+  },
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/Li-Kangling/zotero-watch-folder-multiroot.git"
+  },
+  "homepage": "https://github.com/Li-Kangling/zotero-watch-folder-multiroot",
+  "bugs": {
+    "url": "https://github.com/Li-Kangling/zotero-watch-folder-multiroot/issues"
   }
 }

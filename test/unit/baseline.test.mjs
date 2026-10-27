@@ -41,7 +41,7 @@ vi.mock('../../content/fileScanner.mjs', () => ({
   SKIP_DIRNAMES: new Set(),
 }));
 
-import { runBaseline, isBaselineNeeded, markBaselineComplete } from '../../content/baseline.mjs';
+import { runBaseline, isBaselineNeeded, markBaselineComplete, copyAttachmentToCanonical } from '../../content/baseline.mjs';
 import { TrackingStore, STATE } from '../../content/trackingStore.mjs';
 import { getPref, setPref, getFileHash } from '../../content/utils.mjs';
 import {
@@ -93,6 +93,38 @@ beforeEach(() => {
   isSpecialCollection.mockReturnValue(false);
   getFileHash.mockResolvedValue('hash1');
   scanFolderRecursive.mockResolvedValue([]);
+  delete Zotero.WatchFolderMultiRootOwnership;
+});
+
+describe('multi-root attachment ownership', () => {
+  it('skips an attachment managed by another root before reading or adopting its file', async () => {
+    prefStubs({ multiRootMode: true });
+    Zotero.WatchFolderMultiRootOwnership = { isOwnedElsewhere: vi.fn(() => true) };
+    expect(await copyAttachmentToCanonical({ attachment: { key: 'FOREIGN' } })).toBe('skipped');
+    expect(Zotero.WatchFolderMultiRootOwnership.isOwnedElsewhere).toHaveBeenCalledWith('FOREIGN');
+    expect(IOUtils.exists).not.toHaveBeenCalled();
+    expect(IOUtils.copy).not.toHaveBeenCalled();
+  });
+  it.each([false, undefined])('preserves upstream copying when multiRootMode is %s', async (multiRootMode) => {
+    prefStubs({ multiRootMode });
+    Zotero.WatchFolderMultiRootOwnership = { isOwnedElsewhere: vi.fn(() => true) };
+    chooseCanonicalCollection.mockResolvedValue({ key: 'SUB1' });
+    collectionKeyToDiskRelativePath.mockResolvedValue('Methods');
+    IOUtils.exists.mockImplementation(async p => p === '/storage/a.pdf');
+    const attachment = { key: 'ATT', attachmentFilename: 'a.pdf',
+      getFilePathAsync: async () => '/storage/a.pdf', getCollections: () => [] };
+    const result = await copyAttachmentToCanonical({ attachment, item: attachment,
+      syncRoot: SYNC_ROOT, watchRoot: '/watch', store: await makeStore() });
+    expect(result).toBe('copied');
+    expect(Zotero.WatchFolderMultiRootOwnership.isOwnedElsewhere).not.toHaveBeenCalled();
+    expect(IOUtils.copy).toHaveBeenCalledWith('/storage/a.pdf', '/watch/Methods/a.pdf');
+  });
+  it('fails closed when the ownership lookup throws', async () => {
+    prefStubs({ multiRootMode: true });
+    Zotero.WatchFolderMultiRootOwnership = { isOwnedElsewhere: () => { throw new Error('unavailable'); } };
+    await expect(copyAttachmentToCanonical({ attachment: { key: 'ATT' } })).rejects.toThrow('unavailable');
+    expect(IOUtils.copy).not.toHaveBeenCalled();
+  });
 });
 
 // ─── UT-901 ────────────────────────────────────────────────────────────────

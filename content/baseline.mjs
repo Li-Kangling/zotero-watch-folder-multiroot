@@ -358,6 +358,13 @@ export async function adoptCollectionSubtree({ rootCollection, syncRoot, watchRo
  * Throws on hard IO failures.
  */
 async function _copyAttachmentToCanonical({ attachment, item, syncRoot, watchRoot, store, dryRun, diskHashIndex }) {
+  if (getPref('multiRootMode') === true
+      && await Zotero.WatchFolderMultiRootOwnership?.isOwnedElsewhere?.(attachment.key)) {
+    // Parent items can own attachments managed by different roots (original
+    // and translated PDFs). A new parent membership must not duplicate a link
+    // whose physical file is already managed by another root engine.
+    return 'skipped';
+  }
   const filename = attachment.attachmentFilename;
   if (!filename) return 'skipped';
 
@@ -609,6 +616,7 @@ async function _enumerateUnderSyncRoot(syncRoot) {
   await walk(syncRoot.collection);
   return { collections, attachments: Array.from(attachmentMap.values()) };
 }
+
 
 /**
  * Whole-library enumeration (scopeMode 'library'). There is no single root

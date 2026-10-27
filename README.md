@@ -1,202 +1,58 @@
-# Zotero Watch Folder
+# Watch Folder 多目录
 
-[![Latest release](https://img.shields.io/github/v/release/josesiqueira/zotero-watch-folder?style=flat-square&logo=github&label=release)](https://github.com/josesiqueira/zotero-watch-folder/releases/latest)
-[![Downloads](https://img.shields.io/endpoint?url=https://raw.githubusercontent.com/josesiqueira/zotero-watch-folder/main/.github/badges/downloads.json&style=flat-square&logo=github)](https://github.com/josesiqueira/zotero-watch-folder/releases)
-[![License: GPL v3](https://img.shields.io/github/license/josesiqueira/zotero-watch-folder?style=flat-square)](LICENSE)
-[![Issues](https://img.shields.io/github/issues/josesiqueira/zotero-watch-folder?style=flat-square&logo=github)](https://github.com/josesiqueira/zotero-watch-folder/issues)
-[![User guide](https://img.shields.io/badge/docs-user%20guide-blue?style=flat-square)](https://josesiqueira.github.io/zotero-watch-folder/)
+让多个本地 PDF 文件夹与 Zotero 分类保持对应。每个监控目录独立绑定一个顶层分类，子目录按原层级映射。
 
-<div align=center><img src="./docs/res/teaser.png" width="820px" alt="Zotero Watch Folder — drop a PDF in a folder, it lands in Zotero"></img></div>
+基于 [Jose Siqueira / Zotero Watch Folder v2.8.6](https://github.com/josesiqueira/zotero-watch-folder)，由 Li-Kangling 维护，采用 **GPL-3.0-only**。这是独立衍生版本，非上游官方版本。[上游及修改声明](UPSTREAM.md) · [完整使用说明](MULTIROOT.md)
 
-**A watch folder for Zotero.** Drop a PDF into a folder on your computer, and it shows up in Zotero a few seconds later, with its metadata filled in and a tidy filename. No dragging, no clicking, no manual import.
+## 下载与安装
 
-Point the plugin at a folder, pick the Zotero collection it belongs to, and you're done. If you like, it can also keep your folders and your Zotero collections mirrored — so the way you organise things on disk and the way you organise them in Zotero stay in step.
+1. 从 [本项目 Releases](https://github.com/Li-Kangling/zotero-watch-folder-multiroot/releases/latest) 下载 `zotero-watch-folder-multiroot-*.xpi`。不要下载上游单目录版。
+2. Zotero → 工具 → 插件 → 齿轮 → 从文件安装插件。
+3. 停用原版 Watch Folder，以及其他会自动移动同一批附件的插件规则。
+4. 设置 → Watch Folder 多目录 → 添加本地目录。先用少量测试 PDF 验证。
 
-**[Open the user guide →](https://josesiqueira.github.io/zotero-watch-folder/)** — a friendly walkthrough, a full settings reference, and answers to common questions. The same guide ships inside the plugin and opens from the settings pane.
+发布版面向 **Zotero 10.x**；实际测试环境为 Windows、Zotero 10.0.6。未承诺 macOS/Linux、网络盘、云盘占位文件或数万文件规模兼容。
 
-## Outline
+## 能做什么
 
-[What is this?](#what-is-this)
+- 多个独立监控目录，各自建顶层分类，保留完整子目录结构。
+- 本地 PDF 以链接附件导入；不同位置的相同副本各自独立管理。
+- 分类与目录双向改名、移动；跨根迁移保留附件 key 和批注。
+- 可选择仅导入、双向镜像不联动删除、双向镜像并可恢复删除。
+- 单文件删除自动联动；多个文件或整个目录的删除需要确认。
+- 暂停/恢复、重新定位、解除绑定；冲突隔离，不确定时停止相关对象。
+- 使用元数据命名模板，恢复文件也遵循当前自动命名设置。
 
-[What can it do?](#what-can-it-do)
+## 使用前注意
 
-[Before you start](#before-you-start)
+**镜像和删除联动会修改磁盘文件及 Zotero 条目。请先备份目录和 Zotero 数据目录。**
 
-[Install](#install)
+- 只监控专门的论文目录，不要选整个磁盘、下载目录或含代码/临时文件的总目录。
+- 链接附件不通过 Zotero Storage / WebDAV 同步文件，跨设备需单独同步本地目录；不要把 Zotero 数据库放进网盘实时同步。
+- Zotero → 本地删除保留在 `.zotero-watch-trash`；本地外部删除的恢复位置由 Windows/删除工具决定，插件不能找回被外部永久删除的文件。
+- 旧的内部存储附件可能保留 storage 原件和本地镜像副本；新导入的本地链接附件直接使用原文件。
+- 跨盘迁移的源备份保留在源根回收区，会额外占用空间。
+- 解除绑定保留两端内容；有未完成迁移时不能解除绑定。
 
-[Quick start](#quick-start)
+## 从本地版本升级
 
-<details style="text-indent: 2em">
-<summary>More</summary>
+插件 ID 保持 `watch-folder-multiroot@local.zotero`，现有配置与映射保留。旧的 2.8.6.3 本地版没有本项目更新源，需手动安装一次新版；之后从本仓库检查更新。
 
-[Pick how hands-on it is: three modes](#pick-how-hands-on-it-is-three-modes)
+## 开发与验证
 
-[Where your PDFs live: storage strategy](#where-your-pdfs-live-storage-strategy)
-
-[Reaching your phone & other computers](#reaching-your-phone--other-computers)
-
-[When something looks off](#when-something-looks-off)
-
-</details>
-
-[Development](#development)
-
-[Status & roadmap](#status--roadmap)
-
-[Disclaimer](#disclaimer)
-
-[Contributors](#contributors)
-
-[License](#license)
-
-## What is this?
-
-Zotero Watch Folder is a plugin for [Zotero](https://zotero.org).
-
-It turns a plain folder on your disk into an **inbox for your library**: anything you save there is pulled into Zotero automatically, organised, and (optionally) kept in two-way sync with your collections.
-
-It is built to be:
-
-- **Safe by default** — out of the box it only ever *adds* things; nothing is moved or deleted until you opt in.
-- **Recoverable** — even in the delete-capable mode, removed files go to a recoverable trash, never a permanent erase.
-- **Out of your way** — set it once; new files just appear in Zotero.
-- **All local** — the plugin runs on your computer; your existing Zotero sync carries things to your other devices.
-
-## What can it do?
-
-- **Auto-import PDFs from a watched folder** — drop a file in, it becomes a Zotero item within seconds, metadata looked up and filename cleaned up (e.g. `Smith - 2021 - A Great Paper.pdf`). [Learn more →](#quick-start)
-- **Mirror folders and Zotero collections** — make a subfolder, get a subcollection; rename one, the other follows. Two-way, optional. [Learn more →](#pick-how-hands-on-it-is-three-modes)
-- **Never make duplicates** — save the same paper twice and it's recognised by content hash and skipped.
-- **Delete safely** — in the delete-capable mode, removals go to a recoverable trash inside your folder and can be put back; large deletions ask first; an edited file is never silently overwritten. [Learn more →](#pick-how-hands-on-it-is-three-modes)
-- **Choose where your PDFs live** — store them in Zotero (synced everywhere), link them from your folder (saves Zotero storage), or both. Works great with WebDAV / cloud file sync. [Learn more →](#where-your-pdfs-live-storage-strategy)
-- **Smart rules** — match on title / author / DOI / tags / filename and auto-tag, file into a collection, or skip.
-- **Won't run away with your library** — it pauses if the folder goes missing (e.g. an unplugged drive) instead of treating "everything vanished" as "delete everything." [Learn more →](#when-something-looks-off)
-
-## Before you start
-
-> [!WARNING]
-> **Back up your folder and your Zotero library before you turn this on.**
->
-> Depending on the mode you choose, this plugin can **rename, move, and even delete files on your disk** to keep your folder and Zotero in step, and create or rename **Zotero collections** to match your folders. That's the whole point — but a wrong setting on a folder full of papers you care about can ruin your day.
->
-> Two minutes of insurance:
-> - **Copy your folder somewhere safe** (a backup drive, a cloud snapshot — anything).
-> - **Back up your Zotero library** — make sure Zotero Sync is up to date, or `File → Export Library… → Zotero RDF`.
-> - **Start in Mode 1 (Import only).** It only ever *adds*. Get a feel for it before trying the mirror modes.
->
-> Mode 3 keeps a recoverable trash so most mistakes can be undone — but a backup is still what lets you sleep at night.
-
-## Install
-
-1. Download the latest `.xpi` from the **[Releases page](https://github.com/josesiqueira/zotero-watch-folder/releases/latest)**.
-   - *Firefox users:* right-click the `.xpi` → **Save link as…** (so it isn't opened as an extension by the browser).
-2. In Zotero, open **Tools → Plugins**.
-3. Click the gear icon → **Install Add-on From File…**
-4. Choose the `.xpi` and restart Zotero if asked.
-5. Open **Edit → Settings → Watch Folder** (on macOS: **Zotero → Settings**) and click **Set up Watch Folder…**.
-
-New releases install themselves automatically through Zotero from then on.
-
-## Quick start
-
-Get going in about **2 minutes**:
-
-1. **Run the setup wizard** (Settings → Watch Folder → *Set up Watch Folder…*). It walks you through four choices:
-   - **Watch folder** — the local folder you'll drop PDFs into.
-   - **Sync root** — the Zotero collection everything anchors to.
-   - **Mode** — start with **Import only** (see below).
-   - **PDF storage** — start with **Store PDFs in Zotero** (the default).
-2. **Turn it on.**
-3. **Drop a PDF** into your watch folder. Within a few seconds it appears in your sync-root collection — metadata fetched, filename templated. That's it.
-
-> The watch folder is just an **inbox**. You don't have to keep files there; in the default "stored" setup Zotero takes its own copy on import.
-
-### Pick how hands-on it is: three modes
-
-You choose a mode during setup and can switch any time from the settings — no restart needed.
-
-| Mode | What it does | Who it's for |
-|---|---|---|
-| **Mode 1 — Import only** | New files get imported. Nothing is ever moved or deleted. The safest option. | Most people. **Start here.** |
-| **Mode 2 — Mirror, no deleting** | Folders and Zotero collections mirror each other both ways; renames and moves follow along. Deletions are only flagged, never carried out. | People who organise in folders and want Zotero to match. |
-| **Mode 3 — Mirror with safe delete** | Full two-way sync, including deletions — but deleted files go to a recoverable trash, and big deletions ask first. | People who want their folder and Zotero to be exact mirrors. |
-
-### Where your PDFs live: storage strategy
-
-This is a separate dial from the mode — it decides where the **PDF bytes** sit, which controls your Zotero storage quota and whether files reach your phone.
-
-| Strategy | What it does | Best for |
-|---|---|---|
-| **Store PDFs in Zotero** *(default)* | Zotero keeps the file and syncs it (via Zotero Storage **or** WebDAV). | Most people, and **anyone using WebDAV / cloud file sync** — it's the option that reaches every device, including mobile. |
-| **Link PDFs from watch folder** | Zotero points at the file in your folder; no copy. Saves Zotero storage. | A single-machine setup where you back the folder up yourself. Linked files are **not** uploaded to mobile. |
-| **Store in Zotero and mirror to folder** | A stored copy that syncs **and** a browsable local copy. | Backup / export workflows. |
-
-> Quota full? Two ways out: point Zotero's **file sync at WebDAV** (pCloud, Nextcloud, a NAS…) and keep "stored" — files still sync, just to a cheaper cloud; **or** switch to **linked** and let the folder live on your own backup. See the [architecture doc](docs/architecture.md#5-the-cloud-layer-provider-agnostic-where-bytes-live--how-they-sync) for the full picture.
-
-### Reaching your phone & other computers
-
-The plugin works on **your computer**. What reaches your phone is whatever **Zotero's own sync** carries:
-
-- **Item info** (titles, authors, collections, notes, **annotations**) always syncs — free and unlimited — so you'll see your papers everywhere.
-- **PDF files** sync only if they're **stored** (Zotero Storage or your WebDAV server). **Linked** files stay on the computer and won't open on mobile.
-
-To add files *from* another device, use Zotero normally there (the watch folder is desktop-only); sync carries them back. Configure WebDAV on each device separately if you use it.
-
-### When something looks off
-
-The settings pane surfaces anything needing attention — suppressed items, conflicts, sync warnings, and a "restore trashed folders" option — each with a button to resolve it. If the watch folder becomes unreachable (unplugged drive, cloud eviction), the plugin **pauses** rather than mistaking "everything missing" for "delete everything." The [user guide](https://josesiqueira.github.io/zotero-watch-folder/) has a whole chapter on this.
-
-## Development
-
-Plain ES modules bundled with esbuild — no framework, no heavy toolchain.
-
-```bash
-git clone https://github.com/josesiqueira/zotero-watch-folder.git
-cd zotero-watch-folder
-npm install
-npm run build && npm run bundle   # produces dist/ + the runnable bundle
-npm run package                   # zips the .xpi + writes update.json
-npm test                          # Vitest unit suite
+```sh
+npm ci
+npm test
+npm run build
+npm run source
 ```
 
-The esbuild bundle (`dist/content/scripts/watchFolder.js`) is **what Zotero runs** — editing a `.mjs` does nothing until you re-bundle. Full architecture, the build pipeline, every preference, and the test layout are in **[docs/DEVELOPERS.md](docs/DEVELOPERS.md)**; the visual architecture (layers, the mode × storage dials, the provider-agnostic WebDAV/cloud layer, runtime diagrams) is in **[docs/architecture.md](docs/architecture.md)**.
+安装包和对应源码包生成在工程父目录。`npm run build` 只构建，不上传；`npm run release` 会先测试和构建，再调用已登录的 GitHub CLI 发布。
 
-> Working on the code with an AI agent? Read [`CLAUDE.md`](CLAUDE.md) first — it holds the load-bearing invariants and "don't touch without understanding" notes.
+2026-10-27 重新运行：**1062 项自动测试，30 个文件全部通过**。2026-10-26 的 2.8.6.3 在独立 Zotero 合成文库中通过 **33 项实测**；本次发布仅调整文档、构建和更新配置，不修改同步核心。历史实测不等于所有环境均已验证。
 
-## Status & roadmap
+问题与反馈：[Issues](https://github.com/Li-Kangling/zotero-watch-folder-multiroot/issues)。提交日志前请删除个人路径和敏感信息。
 
-- Mode 1 import, Mode 2 mirror, Mode 3 safe-delete + recoverable trash + restore
-- Content-hash dedup, metadata retrieval, template rename, smart rules
-- PDF storage strategy (stored / linked / mirror) + "Reclaim Zotero Storage" tool
-- Drive-disconnect safety, bulk-delete confirmation, conflict gates
-- *Next:* broader Windows / macOS field-testing
+## 许可证
 
-The full behaviour spec lives in the [test-cases page](https://josesiqueira.github.io/zotero-watch-folder/test-cases.html) (every inclusion/exclusion the plugin acts on).
-
-## Disclaimer
-
-Use this code under GPL-3.0. No warranties are provided. It can move and delete files on your disk by design — keep a backup, and keep the laws of your locality in mind.
-
-## Contributors
-
-Bugs and ideas are welcome at **[github.com/josesiqueira/zotero-watch-folder/issues](https://github.com/josesiqueira/zotero-watch-folder/issues)**. Run `npm test` before opening a PR and add a unit test next to any module you change — the suite enforces a strict no-skipped-tests rule.
-
-Thanks to everyone who has contributed:
-
-<a href="https://github.com/josesiqueira/zotero-watch-folder/graphs/contributors">
-  <img src="https://contrib.rocks/image?repo=josesiqueira/zotero-watch-folder" />
-</a>
-
-## More Zotero plugins
-
-Like this one? There's a whole ecosystem.
-
-> 🧩 **Discover more** — the community-curated **[awesome-zotero](https://github.com/MohamedElashri/awesome-zotero)** list collects plugins, tools, and styles that extend Zotero in every direction. Well worth a browse.
-
-## License
-
-GNU GPL v3.0 — free and open source. See [`LICENSE`](LICENSE) for the full text.
-
----
-
-*Building from source or curious how it works under the hood? See **[docs/DEVELOPERS.md](docs/DEVELOPERS.md)** and the visual **[docs/architecture.md](docs/architecture.md)**.*
+[GNU GPL v3 only](LICENSE)。保留上游作者及版权声明。发布修改后的安装包时，应按许可证提供相应源码及构建材料。

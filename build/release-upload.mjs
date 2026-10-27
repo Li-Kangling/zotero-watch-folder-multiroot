@@ -1,71 +1,21 @@
-import { execFile } from 'child_process';
-import { promises as fs } from 'fs';
-import path from 'path';
-import { fileURLToPath } from 'url';
-
-const __filename = fileURLToPath(import.meta.url);
-const __dirname = path.dirname(__filename);
-const ROOT_DIR = path.resolve(__dirname, '..');
-const DIST_MANIFEST = path.join(ROOT_DIR, 'dist', 'manifest.json');
-
-function run(cmd, args) {
-    return new Promise((resolve, reject) => {
-        execFile(cmd, args, { cwd: ROOT_DIR }, (error, stdout, stderr) => {
-            if (error) {
-                reject(new Error(`${cmd} ${args.join(' ')}\n${stderr || stdout || error.message}`));
-                return;
-            }
-            resolve(stdout.trim());
-        });
-    });
-}
-
-function parseGitHubRepo(remoteUrl) {
-    const httpsMatch = remoteUrl.match(/github\.com[/:]([^/]+)\/([^/.]+)(?:\.git)?$/i);
-    if (!httpsMatch) {
-        throw new Error(`Unsupported remote URL: ${remoteUrl}`);
-    }
-    return `${httpsMatch[1]}/${httpsMatch[2]}`;
-}
-
-async function getTargetRepo() {
-    if (process.env.GITHUB_REPOSITORY) {
-        return process.env.GITHUB_REPOSITORY;
-    }
-    const remoteUrl = await run('git', ['config', '--get', 'remote.origin.url']);
-    return parseGitHubRepo(remoteUrl);
-}
-
-async function getVersion() {
-    const manifestRaw = await fs.readFile(DIST_MANIFEST, 'utf-8');
-    const manifest = JSON.parse(manifestRaw);
-    return manifest.version;
-}
-
-async function ensureRelease(tag, repo) {
-    try {
-        await run('gh', ['release', 'view', tag, '--repo', repo]);
-    } catch {
-        await run('gh', ['release', 'create', tag, '--repo', repo, '--title', tag, '--notes', `Release ${tag}`]);
-    }
-}
-
-async function main() {
-    await run('gh', ['--version']);
-    const version = await getVersion();
-    const tag = `v${version}`;
-    const xpiName = `zotero-watch-folder-${version}.xpi`;
-    const xpiPath = path.join(ROOT_DIR, xpiName);
-    const repo = await getTargetRepo();
-
-    await fs.access(xpiPath);
-    await ensureRelease(tag, repo);
-    await run('gh', ['release', 'upload', tag, xpiPath, '--repo', repo, '--clobber']);
-
-    console.log(`Uploaded ${xpiName} to ${repo} release ${tag}`);
-}
-
-main().catch((err) => {
-    console.error(`Release upload failed: ${err.message}`);
-    process.exit(1);
-});
+/** Publish only this fork, never upstream; requires a clean, pushed source commit. */
+import { execFileSync } from 'node:child_process';
+import { readFileSync } from 'node:fs';
+import path from 'node:path';
+import { fileURLToPath } from 'node:url';
+const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
+const pkg = JSON.parse(readFileSync(path.join(root, 'package.json'), 'utf8'));
+const repo = 'Li-Kangling/zotero-watch-folder-multiroot';
+const run = (...args) => execFileSync(args[0], args.slice(1), { cwd: root, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] }).trim();
+const origin = run('git', 'remote', 'get-url', 'origin');
+if (origin !== `https://github.com/${repo}.git`) throw new Error('Refusing unexpected publication remote');
+if (run('git', 'status', '--porcelain')) throw new Error('Commit source and update.json before publishing');
+const manifest = JSON.parse(readFileSync(path.join(root, 'dist/manifest.json'), 'utf8'));
+if (manifest.version !== pkg.version || manifest.applications.zotero.id !== 'watch-folder-multiroot@local.zotero') throw new Error('Unexpected built identity');
+if (run('git', 'rev-parse', 'HEAD') !== run('git', 'rev-parse', 'origin/main')) throw new Error('Push the corresponding source commit first');
+const stem = `zotero-watch-folder-multiroot-${pkg.version}`;
+const notes = path.join(root, 'RELEASE_NOTES.md');
+const files = [`${stem}.xpi`, `${stem}.xpi.sha256`, `${stem}-source.zip`].map(n => path.resolve(root, '..', n));
+for (const f of files) readFileSync(f);
+// No --clobber: a published version is immutable. Make a new version for changes.
+console.log(run('gh', 'release', 'create', `v${pkg.version}`, ...files, '--repo', repo, '--target', run('git', 'rev-parse', 'HEAD'), '--title', `Watch Folder 多目录 ${pkg.version}`, '--notes-file', notes));

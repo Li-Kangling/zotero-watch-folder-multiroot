@@ -66,6 +66,7 @@ let _promptInFlight = false;
  */
 export function isBulkDelete(affectedCount, totalTracked) {
   if (affectedCount <= 1) return false;
+  if (getPref('multiRootMode') === true) return true;
   if (affectedCount > BULK_FILE_THRESHOLD) return true;
   if (affectedCount > BULK_ABSOLUTE_CAP) return true; // redundant past the flat cap, kept explicit
   if (totalTracked > 0 && (affectedCount / totalTracked) > BULK_PERCENT_THRESHOLD) return true;

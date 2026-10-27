@@ -145,6 +145,17 @@ export function buildFilename(item, pattern = null) {
   return sanitizeFilename(filename.trim(), maxLength);
 }
 
+/** Apply the configured template when restoring, retaining the old name otherwise. */
+export function restoredFilename(attachment, originalName) {
+  if (getPref('autoRename') !== true) return originalName;
+  const owner = attachment.parentItem;
+  if (!owner || !hasUsefulMetadata(owner)) return originalName;
+  const base = buildFilename(owner);
+  if (!base) return originalName;
+  const extension = originalName.match(/\.[^./\\]+$/)?.[0] || '.pdf';
+  return base + extension;
+}
+
 /**
  * Rename an attachment file based on parent item metadata
  * @param {Zotero.Item} attachment - The attachment item

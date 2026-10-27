@@ -1,5 +1,12 @@
 # CLAUDE.md
 
+## Multi-root fork release rules
+- Public identity: `watch-folder-multiroot@local.zotero`; repository: Li-Kangling/zotero-watch-folder-multiroot. Preserve existing IDs/preferences.
+- Source package.json and manifest.json are the release version source of truth. `npm run build` invokes build/multiroot.mjs, bundles all three engines and generates the fork-only update.json.
+- Never use the upstream release workflow or push to the upstream repository. Upstream single-root code is retained for regression and core reuse.
+- Use README.md/MULTIROOT.md for this fork; the remainder of this file documents upstream core invariants.
+
+
 Zotero plugin: watches a folder, imports PDFs, mirrors a Zotero library to disk, and (Mode 3) syncs deletions two-way. Targets Zotero 7 to 10 (`strict_min_version 6.999`, `strict_max_version 10.*`, live-verified on 9.0.4 and 10.0.2). Plugin ID `watch-folder@zotero-plugin.org`. Per-release detail lives in git history + `.private/docs/RELEASE_HISTORY.md` — do NOT grow this file with changelogs.
 
 # CRITICAL RULES — MUST FOLLOW
@@ -23,7 +30,7 @@ Zotero plugin: watches a folder, imports PDFs, mirrors a Zotero library to disk,
 - For complex multi-part work, prefer delegating disjoint slices to parallel sub-agents and coordinating; keep live-MCP testing serial (one flaky bridge).
 
 ## TESTING — never assume it works
-- Run `npx vitest run` (single file: `npx vitest run test/unit/<m>.test.mjs`; by name: `-t "<name>"`). Suite must stay green before any commit/checkpoint. **965 tests across 28 files** — update this count when it changes.
+- Run `npx vitest run` (single file: `npx vitest run test/unit/<m>.test.mjs`; by name: `-t "<name>"`). Suite must stay green before any commit/checkpoint. **1062 tests across 30 files** — update this count when it changes.
 - New module → `test/unit/<m>.test.mjs`, import SUT from `../../content/<m>.mjs`, `vi.mock` deps per-file, reset in `beforeEach`. `test/setup/geckoMocks.js` stubs `Zotero`/`IOUtils`/`PathUtils`/`Services`/`crypto.subtle`. The `_hashCache.mjs` singleton must be cleared in `beforeEach` if you mock `getFileHash`.
 - Live verification = `.private/mcp-runbooks/` (maintainer-only). Run **SMOKE.md S.1–S.7** before tagging a release. Version-guard first: `zotero_plugin_list` must equal source version, else you're testing stale code.
 

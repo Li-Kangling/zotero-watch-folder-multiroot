@@ -1,14 +1,14 @@
 {
   "addons": {
-    "watch-folder@zotero-plugin.org": {
+    "watch-folder-multiroot@local.zotero": {
       "updates": [
         {
-          "version": "2.8.6",
-          "update_link": "https://github.com/josesiqueira/zotero-watch-folder/releases/download/v2.8.6/zotero-watch-folder-2.8.6.xpi",
-          "update_hash": "sha256:b7f66be93a64f745fc84ab8f9358914b7fb7882801c2d36dcb8bd81deed1a5d5",
+          "version": "2.8.6.4",
+          "update_link": "https://github.com/Li-Kangling/zotero-watch-folder-multiroot/releases/download/v2.8.6.4/zotero-watch-folder-multiroot-2.8.6.4.xpi",
+          "update_hash": "sha256:6371f3b15090c9a682dd87ff8bd804e28bc5be405d4045365ab78526e97b4836",
           "applications": {
             "zotero": {
-              "strict_min_version": "6.999",
+              "strict_min_version": "10.0",
               "strict_max_version": "10.*"
             }
           }

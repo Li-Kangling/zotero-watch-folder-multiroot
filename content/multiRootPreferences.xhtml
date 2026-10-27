@@ -1,0 +1,93 @@
+<vbox id="watch-folder-multi-root-preferences"
+      xmlns="http://www.mozilla.org/keymaster/gatekeeper/there.is.only.xul"
+      xmlns:html="http://www.w3.org/1999/xhtml"
+      style="overflow: auto;"
+      onload="if (typeof WatchFolderMultiRootPrefs !== 'undefined') WatchFolderMultiRootPrefs.onLoad()">
+  <html:style>
+    #watch-folder-multi-root-preferences { padding: 4px 2px 16px; }
+    .wfmr-heading { font-size: 1.25em; margin: 0 0 8px; }
+    .wfmr-help { line-height: 1.5; opacity: .78; margin: 6px 0 12px; }
+    .wfmr-toolbar, .wfmr-actions { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; }
+    .wfmr-toolbar { margin-bottom: 12px; }
+    .wfmr-card { border: 1px solid rgba(127,127,127,.3); border-radius: 8px; padding: 12px; margin: 0 0 10px; }
+    .wfmr-card[data-selected="true"] { border-color: #4072b8; background: rgba(64,114,184,.07); }
+    .wfmr-title { font-weight: 600; font-size: 1.05em; }
+    .wfmr-path { overflow-wrap: anywhere; font-family: monospace; margin: 5px 0; }
+    .wfmr-status { opacity: .8; margin: 5px 0 9px; }
+    .wfmr-error, #wfmr-message[data-error="true"] { color: #c63434; }
+    .wfmr-error, .wfmr-conflict { overflow-wrap: anywhere; margin: 8px 0; }
+    .wfmr-conflict { padding: 9px; border-radius: 5px; background: rgba(154,103,0,.12); }
+    #wfmr-message { white-space: pre-wrap; overflow-wrap: anywhere; margin: 8px 0 12px; }
+    #wfmr-options { border: 1px solid rgba(127,127,127,.3); border-radius: 8px; padding: 14px; margin-top: 12px; }
+    .wfmr-option-row { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin: 10px 0; }
+    .wfmr-option-row > label { min-width: 165px; }
+    .wfmr-option-row input[type="text"] { flex: 1; min-width: 210px; }
+    .wfmr-option-row input[type="number"] { width: 95px; }
+    .wfmr-check { display: flex; align-items: center; gap: 7px; margin: 10px 0; }
+    #wfmr-opt-smartRules { box-sizing: border-box; width: 100%; min-height: 150px; font-family: monospace; }
+    #wfmr-options-name { overflow-wrap: anywhere; }
+    #wfmr-options-unsaved { color: #9a6700; }
+    #wfmr-empty { padding: 16px; opacity: .75; }
+  </html:style>
+
+  <html:h2 class="wfmr-heading">多目录监控</html:h2>
+  <html:p class="wfmr-help">每个本地目录对应一个 Zotero 顶层分类，子目录保持相同层级。PDF 直接链接原文件；不同位置的副本独立管理。</html:p>
+  <hbox class="wfmr-toolbar">
+    <button id="wfmr-add" label="添加本地目录…" oncommand="WatchFolderMultiRootPrefs.addDirectory()"/>
+    <button id="wfmr-scan" label="立即同步全部" oncommand="WatchFolderMultiRootPrefs.scanNow()"/>
+    <button id="wfmr-refresh" label="刷新状态" oncommand="WatchFolderMultiRootPrefs.refresh()"/>
+  </hbox>
+  <html:div id="wfmr-message" role="status" aria-live="polite"/>
+  <html:div id="wfmr-roots"/>
+  <html:p id="wfmr-empty" hidden="hidden">尚未添加监控目录。点击“添加本地目录”，选择已整理好的文件夹。</html:p>
+  <html:p class="wfmr-help">暂停会保留绑定，恢复后检查两边变化。解除绑定只停止同步并保留两边内容。目录暂时不可访问时会暂停处理，避免误判为删除。</html:p>
+
+  <vbox id="wfmr-options" hidden="true">
+    <html:h3>目录设置：<html:span id="wfmr-options-name"/></html:h3>
+    <html:p class="wfmr-help">设置只作用于当前选中的监控目录。修改后点击“保存设置”。</html:p>
+    <html:div class="wfmr-option-row">
+      <html:label for="wfmr-opt-mode">同步模式</html:label>
+      <html:select id="wfmr-opt-mode">
+        <html:option value="mode1">仅导入：自动导入新文件</html:option>
+        <html:option value="mode2">双向镜像：删除只提示</html:option>
+        <html:option value="mode3">双向镜像：可恢复删除联动</html:option>
+      </html:select>
+    </html:div>
+    <html:p class="wfmr-help">双向镜像会同步分类和文件夹的改名、移动。删除联动模式下，单个文件自动联动，多个文件或整个文件夹先确认。</html:p>
+    <html:label class="wfmr-check"><html:input id="wfmr-opt-autoRetrieveMetadata" type="checkbox"/>自动获取 PDF 元数据</html:label>
+    <html:label class="wfmr-check"><html:input id="wfmr-opt-metadataFallback" type="checkbox"/>识别失败时，根据首页标识符或文件名创建论文条目</html:label>
+    <html:label class="wfmr-check"><html:input id="wfmr-opt-autoRename" type="checkbox"/>获取元数据后自动重命名文件</html:label>
+    <html:div class="wfmr-option-row">
+      <html:label for="wfmr-opt-renamePattern">文件命名格式</html:label>
+      <html:input id="wfmr-opt-renamePattern" type="text"/>
+    </html:div>
+    <html:p class="wfmr-help">例如：{firstCreator} - {year} - {title}。保持本地已有文件名时，关闭自动重命名。</html:p>
+    <html:div class="wfmr-option-row">
+      <html:label for="wfmr-opt-maxFilenameLength">文件名最大长度</html:label>
+      <html:input id="wfmr-opt-maxFilenameLength" type="number" min="30" max="240" step="1"/>
+    </html:div>
+    <html:div class="wfmr-option-row">
+      <html:label for="wfmr-opt-pollInterval">扫描间隔（秒）</html:label>
+      <html:input id="wfmr-opt-pollInterval" type="number" min="2" max="3600" step="1"/>
+    </html:div>
+    <html:div class="wfmr-option-row">
+      <html:label for="wfmr-opt-maxConcurrentMetadata">元数据识别最大并发数</html:label>
+      <html:input id="wfmr-opt-maxConcurrentMetadata" type="number" min="1" max="10" step="1"/>
+    </html:div>
+    <html:label class="wfmr-check"><html:input id="wfmr-opt-adaptivePolling" type="checkbox"/>空闲时自动降低扫描频率</html:label>
+    <html:div class="wfmr-option-row">
+      <html:label for="wfmr-opt-fileTypes">监控的文件扩展名</html:label>
+      <html:input id="wfmr-opt-fileTypes" type="text" value="pdf" readonly="readonly"/>
+    </html:div>
+    <html:p class="wfmr-help">当前仅监控 PDF，临时文件和其他类型文件不导入。</html:p>
+    <html:label class="wfmr-check"><html:input id="wfmr-opt-smartRulesEnabled" type="checkbox"/>启用自动整理规则</html:label>
+    <html:label for="wfmr-opt-smartRules">自动整理规则（JSON 数组）</html:label>
+    <html:textarea id="wfmr-opt-smartRules" spellcheck="false"/>
+    <html:p class="wfmr-help">沿用上游规则格式。未使用自动整理规则时，保留 [] 即可。</html:p>
+    <hbox class="wfmr-actions">
+      <button id="wfmr-save" label="保存设置" oncommand="WatchFolderMultiRootPrefs.saveOptions()"/>
+      <button id="wfmr-reload-options" label="重新读取设置" oncommand="WatchFolderMultiRootPrefs.reloadOptions()"/>
+      <html:span id="wfmr-options-unsaved" hidden="hidden">有尚未保存的修改</html:span>
+    </hbox>
+  </vbox>
+</vbox>

@@ -16,6 +16,11 @@ import {
 } from '../../content/bulkGuard.mjs';
 
 describe('UT-110: isBulkDelete', () => {
+  beforeEach(() => {
+    // Explicitly exercise the upstream mode: Gecko's second Prefs.get arg is
+    // "global", not a fallback value (the shared legacy stub returns it).
+    Zotero.Prefs.get = vi.fn(() => undefined);
+  });
   it('returns false for 0 or 1 affected', () => {
     expect(isBulkDelete(0, 100)).toBe(false);
     expect(isBulkDelete(1, 100)).toBe(false);
